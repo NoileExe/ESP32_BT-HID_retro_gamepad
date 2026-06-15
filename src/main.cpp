@@ -27,6 +27,7 @@
 */
 
 #include <Arduino.h>
+#include <algorithm>
 
 //GyverLibs
 #include <GTimer.h>
@@ -325,6 +326,39 @@ void indicateWarning()
 	powerLed.tick();
 }
 
+uint8_t get_battery_percent(uint16_t voltage_mv)
+{
+    if (voltage_mv >= BAT_VOLTAGE_MAP.front())  return 100;
+    if (voltage_mv <= BAT_VOLTAGE_MAP.back())   return 0;
+
+    for (size_t i = 0; i < BAT_VOLTAGE_MAP.size() - 1; i++)
+    {
+        // Напряжения верхней и нижней границы текущего интервала
+        uint16_t v_high = BAT_VOLTAGE_MAP[i];
+        uint16_t v_low  = BAT_VOLTAGE_MAP[i + 1];
+
+        if (voltage_mv >= v_low  &&  voltage_mv <= v_high)
+        {
+            float percent_high = 100 - i * BAT_PERCENT_STEP;        // процент для верхней границы (больше %)
+            float percent_low  = 100 - (i + 1) * BAT_PERCENT_STEP;  // процент для нижней границы (меньше %)
+
+            // Доля, на которую измеренное напряжение находится внутри интервала [0.0, 1.0]
+            // (0.0 — если voltage_mv == v_low, 1.0 — если == v_high)
+            float ratio = static_cast<float>(voltage_mv - v_low) / static_cast<float>(v_high - v_low);
+            
+            // SOC (State of Charge) — уровень заряда батареи в процентах
+			// C округлением до ближайшего целого в перспективе (добавляем 0.5 перед отбрасыванием дробной части)
+            float soc = percent_low + ratio * (percent_high - percent_low) + 0.5f;
+
+			// Ограничиваем диапазон значений и отбрасываем дробную часть
+			uint8_t res = static_cast<uint8_t>( std::clamp(soc, 0.0f, 100.0f) );
+            return res;
+        }
+    }
+
+    return 0;
+}
+
 uint16_t get_battery_voltage_mV()
 {
 	// Измерено: при реальных 5100 мВ на источнике питания, analogReadMilliVolts() выдаёт 2526 мВ
@@ -342,19 +376,22 @@ uint16_t get_battery_voltage_mV()
 	}
 
 	uint32_t raw_mV = sum / BATTERY_READ_COUNT;
-	
+
 	//Отладка измерения напряжения
 	/*{
 		static bool isSerialStarted = false;
 		if ( !isSerialStarted )
 		{
 			Serial.begin(115200);
-			delay(100);
+			while (!Serial) {  }
 			isSerialStarted = true;
 		}
 
-		Serial.printf(" raw_mV == %d\n", raw_mV);
-		Serial.printf("%.3f V\n*****\n", raw_mV / 1000.0);
+		float bat_V = raw_mV / 1000.0f;
+		uint8_t percent = get_battery_percent(raw_mV);
+
+		Serial.printf(" raw_mV == %u\n", raw_mV);
+		Serial.printf("%.3f V = %u %%\n*****\n", bat_V, percent);
 	}*/
 
 	raw_mV = (raw_mV * vbatCalibration_mv) / rawCalibration_mv;
@@ -372,6 +409,9 @@ void updatePowerState(TypeMS now)
 		prevBatteryProcessMs = now;
 		
 		uint16_t bat_mV = get_battery_voltage_mV();
+		uint8_t percent = get_battery_percent(bat_mV);
+
+		hidGamepad.setBatteryLevel(percent);
 
 		// Критический разряд: быстро мигаем TODO и уходим в глубокий сон до зарядки
 		// TODO Не даем пользоваться устройством пока батарея не будет заряжена
