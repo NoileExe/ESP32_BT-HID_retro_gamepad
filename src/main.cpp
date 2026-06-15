@@ -40,9 +40,6 @@
 
 //=====================================================================================================================================
 
-// Проверка наличия соединения и обновление режима индикации сообщающего о нем и таймера бездействия
-void updateConnectionState();
-
 // Считывание нажатых в данный момент кнопок и установка в ESP32_HID_gamepad
 void readAllButtons();
 
@@ -51,12 +48,22 @@ void readAllButtons();
 void readButtonsWithTurbo();
 
 
+// Проверка заряда аккумулятора,
+// TODO вычисление и установка в ESP32_HID_gamepad для отправки процента заряда хосту
+// TODO "выключение" устройства при критически низком заряде
+// На вход: время для сравнения с предыдущей проверкой заряда
+void updatePowerState(TypeMS now);
+
+// Проверка наличия соединения и обновление режима индикации сообщающего о нем и таймера бездействия
+// На вход: время для сравнения с предыдущей проверкой соединения
+void updateConnectionState(TypeMS now);
+
+
 // Колбэк при срабатывании таймера удержания одной из комбинаций
 void onCombinationTimeout();
 
 // Колбэк при срабатывании таймера бездействия
 void onInactivityTimeout();
-
 
 // Подготовка устройства ко сну
 void preparingForSleep();
@@ -64,19 +71,22 @@ void preparingForSleep();
 //=====================================================================================================================================
 
 //Таймер удержания комбинации кнопок для выключения/смены режима. 3 СЕКУНДЫ
-//GTimerCbT<millis, TypeMS> timer_combination(COMBINATION_HOLD_MS, onCombinationTimeout, GTMode::Overflow);
-GTimerT<millis, TypeMS> timer_combination(COMBINATION_HOLD_MS, false, GTMode::Overflow);
+//GTimerCbT<millis, TypeMS> timerCombination(COMBINATION_HOLD_MS, onCombinationTimeout, GTMode::Overflow);
+GTimerT<millis, TypeMS> timerCombination(COMBINATION_HOLD_MS, false, GTMode::Overflow);
 
 //Таймер бездействия для выключения при простое более 5 МИНУТ (2 МИНУТЫ при отсутствии сопряжения)
-//GTimerCbT<millis, TypeMS> timer_inactivity(INACTIVITY_DISCONNECTED_MS, onInactivityTimeout, GTMode::Overflow);
-GTimerT<millis, TypeMS> timer_inactivity(INACTIVITY_DISCONNECTED_MS, false, GTMode::Overflow);
+//GTimerCbT<millis, TypeMS> timerInactivity(INACTIVITY_DISCONNECTED_MS, onInactivityTimeout, GTMode::Overflow);
+GTimerT<millis, TypeMS> timerInactivity(INACTIVITY_DISCONNECTED_MS, false, GTMode::Overflow);
 
 //Светодиод, отображающий статус сопряжения
-Blinker btstatus_led(BTLED_PIN);
+Blinker btstatusLed(BTLED_PIN);
+
+//Светодиод, сигнализирующий о низком заряде аккумулятора
+Blinker powerLed(PWRLED_PIN);
 
 
 // Класс геймпада на основе ESP32
-ESP32_HID_gamepad hid_gamepad;
+ESP32_HID_gamepad hidGamepad;
 
 //=====================================================================================================================================
 
@@ -86,6 +96,10 @@ void setup()
 	digitalWrite(PWRLED_PIN, LOW);
 	pinMode(BTLED_PIN, OUTPUT);
 	digitalWrite(BTLED_PIN, LOW);
+
+	pinMode(POWER_PIN, INPUT);
+	analogReadResolution(12);
+	analogSetPinAttenuation(POWER_PIN, ADC_11db);  // ADC_ATTEN_DB_11 = 3.3 В полный диапазон
 	
 	// Инициализация пинов всех кнопок
 	for (uint8_t btn = 0; btn < BUTTONS_VARIANTS; btn++)
@@ -103,64 +117,65 @@ void setup()
 		delay(10);
 	}
 
-	hid_gamepad.begin(ESP32_HID_gamepad::GamepadType::Generic);
-	//hid_gamepad.begin(ESP32_HID_gamepad::GamepadType::XBoxSeriesX);
-	//hid_gamepad.setPowerOffCombination(POWEROFF_COMBO.data(), POWEROFF_COMBO.size());
-	hid_gamepad.setChangeButtonModeCombination(CHMODE_COMBO.data(), CHMODE_COMBO.size());
-	hid_gamepad.setButtonMode(ESP32_HID_gamepad::ButtonMode::Standard);
 
-	btstatus_led.blinkForever(DISCONNECTED_BLINK_MS, DISCONNECTED_BLINK_MS);
-	timer_inactivity.start();
-	timer_combination.stop();
+	hidGamepad.begin(ESP32_HID_gamepad::GamepadType::Generic);
+	//hidGamepad.begin(ESP32_HID_gamepad::GamepadType::XBoxSeriesX);
+	hidGamepad.setPowerOffCombination(POWEROFF_COMBO.data(), POWEROFF_COMBO.size());
+	hidGamepad.setChangeButtonModeCombination(CHMODE_COMBO.data(), CHMODE_COMBO.size());
+	hidGamepad.setButtonMode(ESP32_HID_gamepad::ButtonMode::Standard);
+
+	btstatusLed.blinkForever(DISCONNECTED_BLINK_MS, DISCONNECTED_BLINK_MS);
+	timerCombination.stop();
+	timerInactivity.start();
 }
 
 //=====================================================================================================================================
 
 void loop()
 {
-	// Смена индикации сопряжения или его отсутствия, а также обновление таймера бездействия если требуется
-	updateConnectionState();
+	const TypeMS now = millis();
+
+	// Проверка заряда акккумулятора
+	updatePowerState(now);
+	powerLed.tick();			// Обновление (мигание) светодиода низкого заряда
 	
-	// Обновление (мигание) светодиода статуса сопряжения
-	btstatus_led.tick();
+	// Смена индикации сопряжения или его отсутствия: постоянное свечение или мигание, -
+	// а также обновление таймаута таймера бездействия в зависимости от наличия сопряжения (если требуется)
+	updateConnectionState(now);
+	btstatusLed.tick();			// Обновление (мигание) светодиода статуса сопряжения
 
 	// Отсчёт таймеров (если активны)
-
-
-	if (timer_combination.tick())		{ onCombinationTimeout();	return; }
-	if (timer_inactivity.tick())		{ onInactivityTimeout();	return; }
-	
-	// Проверка заряда аккумулятора
-	//gamepad_power_manager.tick();
+	if (timerCombination.tick())		{ onCombinationTimeout();	return; }
+	if (timerInactivity.tick())			{ onInactivityTimeout();	return; }
 
 	//------------------------------------------------------------------
-
-	const TypeMS now = millis();
+	
+	// Последнее время считывания кнопок и отправки отчета
 	static TypeMS prevGamepadProcessMs = 0;
 
 	if ( REPORT_INTERVAL_MS <= (now - prevGamepadProcessMs) )
 	{
 		prevGamepadProcessMs = now;
 
-		// Чтение нажатых кнопок сразу в hid_gamepad
+		// Чтение нажатий сразу в hidGamepad
 		readAllButtons();
 		//readButtonsWithTurbo();
 
-		if (hid_gamepad.isAnyButtonPressed())
+		if (hidGamepad.isAnyButtonPressed())
 		{
-			if (hid_gamepad.isConnected())
-				timer_inactivity.start();  //Сброс таймера бездействия
+			if (hidGamepad.isConnected())
+				timerInactivity.start();  //Сброс таймера бездействия
 
-			bool isPowerOffCombo = hid_gamepad.isPowerOffCombination();				// Комбинация выключения (перехода сон)
-			bool isChangeModeCombo = hid_gamepad.isChangeButtonModeCombination();	// Комбинация для смены режима кнопок (Standard/Turbo/Slow)
+			bool isPowerOffCombo = hidGamepad.isPowerOffCombination();				// Комбинация выключения (перехода сон)
+			bool isChangeModeCombo = hidGamepad.isChangeButtonModeCombination();	// Комбинация для смены режима кнопок (Standard/Turbo/Slow)
 
 			// Если удерживается комбинация кнопок для выключения/смены режима
 			if (isPowerOffCombo || isChangeModeCombo)
 			{
-				if (!timer_combination.running())
+				if (!timerCombination.running())
 				{
-					timer_combination.start();
-					hid_gamepad.sendAllEmptyReport();
+					timerCombination.start();
+					hidGamepad.sendAllEmptyReport();
 				}
 				
 				return;
@@ -168,141 +183,107 @@ void loop()
 		}
 
 		// Попадаем внутрь когда ранее нажатая комбинация смены комбинации была отпущена - предотвращаем её отправку
-		if (timer_combination.running())
+		if (timerCombination.running())
 		{
-			timer_combination.stop();
-			hid_gamepad.sendAllEmptyReport();
+			timerCombination.stop();
+			hidGamepad.sendAllEmptyReport();
 			return;
 		}
 		
 		// Отправка состояния кнопок и осей - метод сам проверит НАЛИЧИЕ соединения и ИЗМЕНИЛАСЬ ЛИ комбинация нажатых/отпущенных
-		hid_gamepad.sendReport();
+		hidGamepad.sendReport();
 	}
 }
 
 //=====================================================================================================================================
-
-void updateConnectionState()
-{
-	//Статусы соединения: предыдущее и текущее
-	static bool prevConnectionStatus = false;
-	static bool currConnectionStatus = false;
-	
-	currConnectionStatus = hid_gamepad.isConnected();
-	if (currConnectionStatus != prevConnectionStatus)
-	{
-		btstatus_led.stop();
-
-		if ( currConnectionStatus )		btstatus_led.blinkForever(UINT16_MAX);
-		else							btstatus_led.blinkForever(DISCONNECTED_BLINK_MS, DISCONNECTED_BLINK_MS);
-
-		prevConnectionStatus = currConnectionStatus;
-
-
-		TypeMS timerInactivityMS = timer_inactivity.getTime();
-		if (currConnectionStatus  &&  timerInactivityMS != INACTIVITY_CONNECTED_MS)
-		{
-			timer_inactivity.stop();
-			timer_inactivity.setTime(INACTIVITY_CONNECTED_MS);
-		}
-		else if (!currConnectionStatus  &&  timerInactivityMS != INACTIVITY_DISCONNECTED_MS)
-		{
-			timer_inactivity.stop();
-			timer_inactivity.setTime(INACTIVITY_DISCONNECTED_MS);
-		}
-
-		if (!timer_inactivity.running())
-			timer_inactivity.start();
-	}
-}
 
 void readAllButtons()
 {
   // Считываем все данные
   for (uint8_t btn = 0; btn < BUTTONS_VARIANTS; btn++)
   {
-    GamepadButton currBtn = static_cast<GamepadButton>(btn);
+	GamepadButton currBtn = static_cast<GamepadButton>(btn);
 
-    uint8_t pin = getButtonPin(currBtn);
-    if (pin != UINT8_MAX)
-    {
-      bool isCurrButtonPressed = digitalRead(pin) == LOW;
-      hid_gamepad.setButtonState(currBtn, isCurrButtonPressed);
-    }
+	uint8_t pin = getButtonPin(currBtn);
+	if (pin != UINT8_MAX)
+	{
+	  bool isCurrButtonPressed = digitalRead(pin) == LOW;
+	  hidGamepad.setButtonState(currBtn, isCurrButtonPressed);
+	}
   }
   
   // Левый и правый стики и триггеры читаются и устанавливаются отдельно как аналоговые значения
-  // НА ДАННЫЙ МОМЕНТ ПОКА НЕ РЕАЛИЗОВАНЫ
+  // TODO НА ДАННЫЙ МОМЕНТ ПОКА НЕ РЕАЛИЗОВАНЫ
 }
 
 void readButtonsWithTurbo()
 {
-  // ================================================== TURBO ==================================================
-  // ТОЛЬКО для геймпадов с дублирующими турбо-кнопками
-  // Включение/выключение турбо-функционала для отдельных кнопок
-  for (uint8_t btn = 0; btn < BUTTONS_VARIANTS; btn++)
-  {
-    GamepadButton currBtn = static_cast<GamepadButton>(btn);
-    uint8_t pin = getButtonPin(currBtn);
-    
-    if (pin != UINT8_MAX)
-    {
-      bool isCurrButtonPressed = digitalRead(pin) == LOW;
+	// ================================================== TURBO ==================================================
+	// ТОЛЬКО для геймпадов с дублирующими турбо-кнопками
+	// Включение/выключение турбо-функционала для отдельных кнопок
+	for (uint8_t btn = 0; btn < BUTTONS_VARIANTS; btn++)
+	{
+		GamepadButton currBtn = static_cast<GamepadButton>(btn);
+	uint8_t pin = getButtonPin(currBtn);
+	
+	if (pin != UINT8_MAX)
+	{
+	  bool isCurrButtonPressed = digitalRead(pin) == LOW;
 
-      // isTurboButton(GamepadButton::A/B/C) == true - означает что нажата соотв. Turbo-кнопка X/Y/Z
-      switch (currBtn)
-      {
-        case GamepadButton::X:
-          if (isCurrButtonPressed != hid_gamepad.isTurboButton(GamepadButton::A))
-            hid_gamepad.setTurboButton(GamepadButton::A, isCurrButtonPressed);
-          break;
-        case GamepadButton::Y:
-          if (isCurrButtonPressed != hid_gamepad.isTurboButton(GamepadButton::B))
-            hid_gamepad.setTurboButton(GamepadButton::B, isCurrButtonPressed);
-          break;
-        case GamepadButton::Z:
-          if (isCurrButtonPressed != hid_gamepad.isTurboButton(GamepadButton::C))
-            hid_gamepad.setTurboButton(GamepadButton::C, isCurrButtonPressed);
-          break;
-      }
-    }
+	  // isTurboButton(GamepadButton::A/B/C) == true - означает что нажата соотв. Turbo-кнопка X/Y/Z
+	  switch (currBtn)
+	  {
+		case GamepadButton::X:
+		  if (isCurrButtonPressed != hidGamepad.isTurboButton(GamepadButton::A))
+			hidGamepad.setTurboButton(GamepadButton::A, isCurrButtonPressed);
+		  break;
+		case GamepadButton::Y:
+		  if (isCurrButtonPressed != hidGamepad.isTurboButton(GamepadButton::B))
+			hidGamepad.setTurboButton(GamepadButton::B, isCurrButtonPressed);
+		  break;
+		case GamepadButton::Z:
+		  if (isCurrButtonPressed != hidGamepad.isTurboButton(GamepadButton::C))
+			hidGamepad.setTurboButton(GamepadButton::C, isCurrButtonPressed);
+		  break;
+	  }
+	}
   }
   // ================================================== TURBO ==================================================
   
   // Считываем все данные
   for (uint8_t btn = 0; btn < BUTTONS_VARIANTS; btn++)
   {
-    GamepadButton currBtn = static_cast<GamepadButton>(btn);
+	GamepadButton currBtn = static_cast<GamepadButton>(btn);
 
-    // ================================================== TURBO ==================================================
-    // Полностью игнорируем нажатие X/Y/Z. isTurboButton == true для A/B/C уже означает нажатие X/Y/Z
-    switch (currBtn)
-    {
-      case GamepadButton::X:
-      case GamepadButton::Y:
-      case GamepadButton::Z:
-        continue;
-    }
-    // ================================================== TURBO ==================================================
+	// ================================================== TURBO ==================================================
+	// Полностью игнорируем нажатие X/Y/Z. isTurboButton == true для A/B/C уже означает нажатие X/Y/Z
+	switch (currBtn)
+	{
+	  case GamepadButton::X:
+	  case GamepadButton::Y:
+	  case GamepadButton::Z:
+		continue;
+	}
+	// ================================================== TURBO ==================================================
 
-    uint8_t pin = getButtonPin(currBtn);
+	uint8_t pin = getButtonPin(currBtn);
 
-    if (pin != UINT8_MAX)
-    {
-      bool isCurrButtonPressed = (digitalRead(pin) == LOW);
+	if (pin != UINT8_MAX)
+	{
+	  bool isCurrButtonPressed = (digitalRead(pin) == LOW);
 
-      // ================================================== TURBO ==================================================
-      switch (currBtn)
-      {
-        case GamepadButton::A:
-        case GamepadButton::B:
-        case GamepadButton::C:
-          isCurrButtonPressed |= hid_gamepad.isTurboButton(currBtn);
-      }
-      // ================================================== TURBO ==================================================
+	  // ================================================== TURBO ==================================================
+	  switch (currBtn)
+	  {
+		case GamepadButton::A:
+		case GamepadButton::B:
+		case GamepadButton::C:
+		  isCurrButtonPressed |= hidGamepad.isTurboButton(currBtn);
+	  }
+	  // ================================================== TURBO ==================================================
 
-      hid_gamepad.setButtonState(currBtn, isCurrButtonPressed);
-    }
+	  hidGamepad.setButtonState(currBtn, isCurrButtonPressed);
+	}
   }
 
   // Левый и правый стики и триггеры читаются и устанавливаются отдельно как аналоговые значения
@@ -311,28 +292,173 @@ void readButtonsWithTurbo()
 
 //=====================================================================================================================================
 
+void indicateCritical()
+{
+	bool btLedState = digitalRead(BTLED_PIN);		// Последний статус свечения статуса сопряжения
+	digitalWrite(BTLED_PIN, LOW);
+	
+	powerLed.stop();
+	
+	for (int i = 0; i < 3; ++i)
+	{
+		powerLed.blink(4, 300, 300);	// мигнуть 4 раза, 300мс вкл, 300мс выкл
+		
+		while (!powerLed.ready())
+		{
+			powerLed.tick();
+			//TODO wdt reset
+			delay(50);
+		}
+		
+		delay(1000);
+	}
+
+	digitalWrite(BTLED_PIN, btLedState);
+}
+
+void indicateWarning()
+{
+	// Предупреждение: медленное мигание (2000 мс вкл / 500 мс выкл)
+	if (!powerLed.running())
+		powerLed.blinkForever(2000, 500);
+	
+	powerLed.tick();
+}
+
+uint16_t get_battery_voltage_mV()
+{
+	// Измерено: при реальных 5100 мВ на источнике питания, analogReadMilliVolts() выдаёт 2526 мВ
+	// Коэффициент коррекции = 5100 / 2526
+	// Показания при делителе Rверх = 100 кОм и Rниз = 100 кОм
+	// Rверх - от Vbat+ к пину измерения, Rниз - от GND к пину измерения
+	constexpr uint16_t vbatCalibration_mv = 5100;    // Реальное напряжение на источнике питания в мВ
+	constexpr uint16_t rawCalibration_mv = 2526;     // Показание analogReadMilliVolts на пине в мВ
+	
+	
+	uint32_t sum = 0;
+	for (uint8_t i = 0; i < BATTERY_READ_COUNT; i++)
+	{
+		sum += analogReadMilliVolts(POWER_PIN);
+	}
+
+	uint32_t raw_mV = sum / BATTERY_READ_COUNT;
+	
+	//Отладка измерения напряжения
+	/*{
+		static bool isSerialStarted = false;
+		if ( !isSerialStarted )
+		{
+			Serial.begin(115200);
+			delay(100);
+			isSerialStarted = true;
+		}
+
+		Serial.printf(" raw_mV == %d\n", raw_mV);
+		Serial.printf("%.3f V\n*****\n", raw_mV / 1000.0);
+	}*/
+
+	raw_mV = (raw_mV * vbatCalibration_mv) / rawCalibration_mv;
+
+	return static_cast<uint16_t>(raw_mV);
+}
+
+void updatePowerState(TypeMS now)
+{
+	// Последнее время проверки заряда
+	static TypeMS prevBatteryProcessMs = 0;
+
+	if ( BATTERY_INTERVAL_MS <= (now - prevBatteryProcessMs) )
+	{
+		prevBatteryProcessMs = now;
+		
+		uint16_t bat_mV = get_battery_voltage_mV();
+
+		// Критический разряд: быстро мигаем TODO и уходим в глубокий сон до зарядки
+		// TODO Не даем пользоваться устройством пока батарея не будет заряжена
+		while (bat_mV <= BATTERY_CRITICAL_LEVEL)
+		{
+			indicateCritical();
+			// TODO переход в глубокий сон
+		}
+		
+		
+		if ( (bat_mV + VOLTAGE_ACCURACY_LEVEL) < BATTERY_WARNING_LEVEL )
+			indicateWarning();
+		
+		// Напряжение в норме – гасим светодиод
+		else if (powerLed.running())
+			powerLed.stop();
+	}
+}
+
+//=====================================================================================================================================
+
+void updateConnectionState(TypeMS now)
+{
+	// Последнее время проверки сопряжения
+	static TypeMS prevConnectionProcessMs = 0;
+	
+	// Статусы соединения: предыдущее и текущее
+	static bool prevConnectionStatus = false;
+	static bool currConnectionStatus = false;
+
+	if ( CONNECTION_INTERVAL_MS <= (now - prevConnectionProcessMs) )
+	{
+		currConnectionStatus = hidGamepad.isConnected();
+		if (currConnectionStatus != prevConnectionStatus)
+		{
+			prevConnectionStatus = currConnectionStatus;
+
+			
+			btstatusLed.stop();
+
+			if ( currConnectionStatus )		btstatusLed.blinkForever(UINT16_MAX);
+			else							btstatusLed.blinkForever(DISCONNECTED_BLINK_MS, DISCONNECTED_BLINK_MS);
+
+
+			TypeMS timerInactivityMS = timerInactivity.getTime();
+			if (currConnectionStatus  &&  timerInactivityMS != INACTIVITY_CONNECTED_MS)
+			{
+				timerInactivity.stop();
+				timerInactivity.setTime(INACTIVITY_CONNECTED_MS);
+			}
+			else if (!currConnectionStatus  &&  timerInactivityMS != INACTIVITY_DISCONNECTED_MS)
+			{
+				timerInactivity.stop();
+				timerInactivity.setTime(INACTIVITY_DISCONNECTED_MS);
+			}
+
+			if (!timerInactivity.running())
+				timerInactivity.start();
+		}
+	}
+}
+
+//=====================================================================================================================================
+
 void onCombinationTimeout()
 {
-	//timer_combination.stop();
+	//timerCombination.stop();
 
 	// Если таймер удержания кнопок достиг требуемого значения и комбинация соответствует - ВЫКЛЮЧАЕМ
-	if ( hid_gamepad.isPowerOffCombination() )
+	if ( hidGamepad.isPowerOffCombination() )
 	{
-		//gamepad_power_manager.sleep();  // Вызовет колбэк preparingForSleep()
+		// TODO переход в глубокий сон
 	}
 	
 	// Если таймер удержания кнопок достиг требуемого значения и комбинация соответствует - МЕНЯЕМ РЕЖИМ
-	else if ( hid_gamepad.isChangeButtonModeCombination() )
+	else if ( hidGamepad.isChangeButtonModeCombination() )
 	{
 		// Количество значений
-		static constexpr uint8_t modeCount = static_cast<uint8_t>(ESP32_HID_gamepad::ButtonMode::ButtonModeCount);
-		uint8_t currMode = static_cast<uint8_t>( hid_gamepad.getButtonMode() );
+		constexpr uint8_t modeCount = static_cast<uint8_t>(ESP32_HID_gamepad::ButtonMode::ButtonModeCount);
+		uint8_t currMode = static_cast<uint8_t>( hidGamepad.getButtonMode() );
 		uint8_t nextMode = (currMode + 1) % modeCount;
 
-		hid_gamepad.setButtonMode( static_cast<ESP32_HID_gamepad::ButtonMode>(nextMode) );
+		hidGamepad.setButtonMode( static_cast<ESP32_HID_gamepad::ButtonMode>(nextMode) );
 
 
-		bool btLedState = digitalRead(BTLED_PIN);
+		bool btLedState = digitalRead(BTLED_PIN);		// Последний статус свечения статуса сопряжения
+		bool pwrLedState = digitalRead(PWRLED_PIN);		// Последний статус свечения низкого заряда
 		digitalWrite(BTLED_PIN, LOW);
 
 		// Сообщаем пользователю о смене моргая светодиодом питания, 
@@ -346,18 +472,20 @@ void onCombinationTimeout()
 		}
 
 		digitalWrite(BTLED_PIN, btLedState);
+		digitalWrite(PWRLED_PIN, pwrLedState);
 	}
 	
-	timer_combination.start();
+	timerCombination.start();
 }
 
 void onInactivityTimeout()
 {
-	//timer_inactivity.stop();
+	//timerInactivity.stop();
 
+	// TODO переход в глубокий сон
 	//preparingForSleep();
 	
-	timer_inactivity.start();
+	timerInactivity.start();
 }
 
 //=====================================================================================================================================
@@ -365,13 +493,16 @@ void onInactivityTimeout()
 // Подготовка ко сну
 void preparingForSleep()
 {
-	if ( hid_gamepad.isConnected() )
-		hid_gamepad.end();
+	if ( hidGamepad.isConnected() )
+		hidGamepad.end();
 
-	btstatus_led.stop();
+	btstatusLed.stop();
+	powerLed.stop();
 
-	timer_combination.stop();
-	timer_inactivity.stop();
+	timerCombination.stop();
+	timerInactivity.stop();
+
+	// TODO переход в глубокий сон
 }
 
 //=====================================================================================================================================
