@@ -1,0 +1,40 @@
+# PlatformIO (если вдруг используется)
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# VS Code
+.vscode/
+
+# Временные файлы
+*~
+*.bak
+*.tmp
+*.swp
+*.swo
+*#
+Thumbs.db
+$RECYCLE.BIN/
+
+# Логи
+*.log
+
+# Иные артефакты сборки
+*.elf
+*.bin
+*.hex
+*.eep
+*.lss
+*.sym
+*.map
+*.zip
+*.gz
+*.tar
+
+# Секреты и локальные конфиги
+.env
+*.key
+*.pem
+
+# Черновики и исходники для документации
+docs/raw/
