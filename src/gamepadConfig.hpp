@@ -33,7 +33,7 @@ using TypeMS = decltype(millis());
 
 //------------------------------------------------------------------
 
-// ВЫБОР ТИПА ГЕЙМПАДА
+// === ВЫБОР ТИПА ГЕЙМПАДА ===
 #define ONLY_DIGITAL_GAMEPAD		// Только цифровые кнопки без аналоговых стиков/триггеров
 									// 2ух кнопочные: NES, Sega Master System, TurboGrafx, atari 7800, Amstrad GX4000, ...
 									// 4ех кнопочные: SNES, Neo Geo, Neo Geo CD, Vectrex, Philips CD-i, Amiga CD32, ...
@@ -57,8 +57,8 @@ inline constexpr std::string_view GAMEPAD_MANUFACTURER = "NoileExe";	// Прои
 // Версионные данные
 inline constexpr std::string_view MODEL_NUMBER = "ESP32_BT-HID_retro_gamepad 1.0";
 inline constexpr std::string_view SERIAL_NUMBER = "001";		// Серийный номер устройства (увеличивать для каждого след. устройства)
-inline constexpr std::string_view SOFTWARE_REVISION = "0.3.0";	// Версия прошивки
-inline constexpr std::string_view HARDWARE_REVISION = "1.1";	// Ревизия платы/железа/конфигурации
+inline constexpr std::string_view SOFTWARE_REVISION = "0.4.0";	// Версия прошивки
+inline constexpr std::string_view HARDWARE_REVISION = "1.2";	// Ревизия платы/железа/конфигурации
 // Версия библиотеки pioarduino
 inline constexpr std::string_view FIRMWARE_REVISION = "Arduino v3.3.8 | ESP-IDF v5.5.4 (13.04.2026)";
 
@@ -131,29 +131,39 @@ static_assert(REPORT_INTERVAL_MS <= TURBO_MS,
 //------------------------------------------------------------------
 
 // === Все что связано с измерением заряда аккумулятора ===
-inline constexpr uint8_t BATTERY_READ_COUNT = 64;						// Количество считываний напряжения аккумулятора для точности
-inline constexpr uint16_t VOLTAGE_ACCURACY_LEVEL = 80;					// Порог погрешности измерений в мВ
-inline constexpr uint16_t BATTERY_WARNING_LEVEL = 3300;					// При этом уровне заряда батареи моргает LED для предупреждения о низком заряде
-inline constexpr uint16_t BATTERY_CRITICAL_LEVEL = 3100;				// При этом уровне заряда быстро моргает LED и геймпад отключается
-//inline constexpr uint8_t BATTERY_WARNING_PERCENT = 20;					// При этом проценте заряда батареи моргает LED для предупреждения о низком заряде
-//inline constexpr uint8_t BATTERY_CRITICAL_PERCENT = 5;					// При этом проценте заряда быстро моргает LED и геймпад отключается
-inline constexpr TypeMS BATTERY_INTERVAL_MS = 30ul * 1000;				// Интервал проверки заряда аккумулятора в МС (оптимально 30-60 секунд)
+#define USE_MAX1704X_FUEL_GAGE false	// true - если для измерения заряда аккумулятора используется микросхема серии MAX1704X
+										// false - если заряд аккумулятора определяется на основании напряжения полученного с резисторного делителя
 
-inline constexpr float BAT_PERCENT_STEP = 2.0f;
 
-// Таблица напряжений (мВ) от 100% (4.20 В) до 0% (3.10 В) с шагом BAT_PERCENT_STEP в %
-// Составлена при помощи ИИ на основании усредненных данных по кривым разряда нескольких популярных Li-Ion аккумуляторов
-// 2% шаг, cutoff 3100 мВ
-inline constexpr std::array<uint16_t, 51> BAT_VOLTAGE_MAP =
-{
-    4200, 4160, 4130, 4100, 4070, 4040, 4010, 3980,
-    3950, 3920, 3890, 3860, 3830, 3800, 3780, 3765,
-    3750, 3735, 3720, 3710, 3700, 3690, 3680, 3670,
-    3660, 3650, 3640, 3630, 3620, 3610, 3600, 3585,
-    3570, 3550, 3530, 3510, 3490, 3465, 3440, 3410,
-    3375, 3340, 3310, 3280, 3250, 3225, 3200, 3175,
-    3150, 3125, 3100
-};
+inline constexpr uint8_t BATTERY_WARNING_PERCENT = 20;			// При этом проценте заряда батареи моргает LED для предупреждения о низком заряде
+inline constexpr uint8_t BATTERY_CRITICAL_PERCENT = 2;			// При этом проценте заряда быстро моргает LED и геймпад отключается
+inline constexpr TypeMS BATTERY_INTERVAL_MS = 30ul * 1000;		// Интервал проверки заряда аккумулятора в МС (оптимально 30-60 секунд)
+
+#if !USE_MAX1704X_FUEL_GAGE
+	inline constexpr uint8_t BATTERY_READ_COUNT = 64;			// Количество считываний напряжения аккумулятора для точности
+	inline constexpr float BAT_PERCENT_STEP = 2.0f;
+
+	// Таблица напряжений (мВ) от 100% (4.20 В) до 0% (3.10 В) с шагом BAT_PERCENT_STEP в %
+	// Составлена при помощи ИИ на основании усредненных данных по кривым разряда нескольких популярных Li-Ion аккумуляторов
+	// 2% шаг, cutoff 3100 мВ
+	inline constexpr std::array<uint16_t, 51> BAT_VOLTAGE_MAP =
+	{
+		4200, 4160, 4130, 4100, 4070, 4040, 4010, 3980,
+		//100	98	  96	94	  92	90	  88	86
+		3950, 3920, 3890, 3860, 3830, 3800, 3780, 3765,
+		// 84	82	  80	78	  76	74	  72	70
+		3750, 3735, 3720, 3710, 3700, 3690, 3680, 3670,
+		// 68	66	  64	62	  60	58	  56	54
+		3660, 3650, 3640, 3630, 3620, 3610, 3600, 3585,
+		// 52	50	  48	46	  44	42	  40	38
+		3570, 3550, 3530, 3510, 3490, 3465, 3440, 3410,
+		// 36	34	  32	30	  28	26	  24	22
+		3375, 3340, 3310, 3280, 3250, 3225, 3200, 3175,
+		// 20	 18	  16	14	  12	10	   8	 6
+		3150, 3125, 3100
+		// 4	 2	   0
+	};
+#endif
 
 //------------------------------------------------------------------
 
@@ -213,7 +223,12 @@ inline constexpr std::array<GamepadButton, 3> CHMODE_COMBO =
 inline constexpr uint8_t PWRLED_PIN = 20;	// Сигнал о низком заряде АКБ
 inline constexpr uint8_t BTLED_PIN = 21;	// Состояние сопряжения (мигает - режим видимости, горит - соединен)
 
-inline constexpr uint8_t POWER_PIN = 4;     //Аналоговый пин считывающий уровень напряжения
+#if USE_MAX1704X_FUEL_GAGE
+	inline constexpr uint8_t SDA_PIN = 0;	// Пин подключающийся к SDA пину MAX1704x
+	inline constexpr uint8_t SCL_PIN = 1;	// Пин подключающийся к SCL пину MAX1704x
+#else
+	inline constexpr uint8_t POWER_PIN = 4;	//Аналоговый пин считывающий уровень напряжения
+#endif
 
 
 inline uint8_t getButtonPin(GamepadButton btn)

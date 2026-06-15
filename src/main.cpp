@@ -39,6 +39,11 @@
 #include "BLE/IDeviceAdapter.hpp"
 #include "gamepadConfig.hpp"
 
+#if USE_MAX1704X_FUEL_GAGE
+	#include <Wire.h> // Для I2C
+	#include <SparkFun_MAX1704x_Fuel_Gauge_Arduino_Library.h>
+#endif
+
 //=====================================================================================================================================
 
 // Считывание нажатых в данный момент кнопок и установка в ESP32_HID_gamepad
@@ -48,6 +53,10 @@ void readAllButtons();
 // и установка в ESP32_HID_gamepad
 void readButtonsWithTurbo();
 
+
+// Чтение и отправка осей и кнопок, а также отлов комбинаций для выключения и смены режима
+// На вход: время для сравнения с предыдущим чтением/отправкой
+void updateGamepadState(TypeMS now);
 
 // Проверка заряда аккумулятора,
 // TODO вычисление и установка в ESP32_HID_gamepad для отправки процента заряда хосту
@@ -89,18 +98,21 @@ Blinker powerLed(PWRLED_PIN);
 // Класс геймпада на основе ESP32
 ESP32_HID_gamepad hidGamepad;
 
+#if USE_MAX1704X_FUEL_GAGE
+	// Объект для измерения заряда аккумулятора при помощи микросхем серии MAX1704X 
+	// с явным указанием её версии
+	SFE_MAX1704X batteryLevel(MAX1704X_MAX17043);
+#endif
+
 //=====================================================================================================================================
 
 void setup()
 {
+	// === Настройка пинов ===
 	pinMode(PWRLED_PIN, OUTPUT);
 	digitalWrite(PWRLED_PIN, LOW);
 	pinMode(BTLED_PIN, OUTPUT);
 	digitalWrite(BTLED_PIN, LOW);
-
-	pinMode(POWER_PIN, INPUT);
-	analogReadResolution(12);
-	analogSetPinAttenuation(POWER_PIN, ADC_11db);  // ADC_ATTEN_DB_11 = 3.3 В полный диапазон
 	
 	// Инициализация пинов всех кнопок
 	for (uint8_t btn = 0; btn < BUTTONS_VARIANTS; btn++)
@@ -118,13 +130,43 @@ void setup()
 		delay(10);
 	}
 
+	// === Настройка измерения напряжения ===
+#if USE_MAX1704X_FUEL_GAGE
+	Wire.begin(SDA_PIN, SCL_PIN);		// Настройка I2C (обязательно перед SFE_MAX1704X::begin())
 
+	if ( !batteryLevel.begin(Wire) )
+	{
+		// В случае отсутствия соединения с I2C модулем замораживаем выполнение программы
+		// и мигаем светодиодом оповещения о низком заряде
+		while (true)
+		{
+			if ( !powerLed.running() )
+				powerLed.blinkForever(500, 250);
+			
+			powerLed.tick();
+			delay(50);
+		}
+	}
+
+	batteryLevel.wake();			// Сбрасываем флаг сна (требуется если модуль переводили в сон)
+	delay(300);
+	batteryLevel.quickStart();		// Сбрасываем вычисления (после сна могут быть сильно устаревшие данные). К сожалению, 
+									// это снизит точность вычисление против случая когда модуль не усыплялся и работал бы непрерывно
+	delay(50);
+#else
+	pinMode(POWER_PIN, INPUT);
+	analogReadResolution(12);
+	analogSetPinAttenuation(POWER_PIN, ADC_11db);  // ADC_ATTEN_DB_11 = 3.3 В полный диапазон
+#endif
+
+	// === Настройка геймпада ===
 	hidGamepad.begin(ESP32_HID_gamepad::GamepadType::Generic);
 	//hidGamepad.begin(ESP32_HID_gamepad::GamepadType::XBoxSeriesX);
 	hidGamepad.setPowerOffCombination(POWEROFF_COMBO.data(), POWEROFF_COMBO.size());
 	hidGamepad.setChangeButtonModeCombination(CHMODE_COMBO.data(), CHMODE_COMBO.size());
 	hidGamepad.setButtonMode(ESP32_HID_gamepad::ButtonMode::Standard);
 
+	// === Светодиоды и таймеры ===
 	btstatusLed.blinkForever(DISCONNECTED_BLINK_MS, DISCONNECTED_BLINK_MS);
 	timerCombination.stop();
 	timerInactivity.start();
@@ -151,6 +193,13 @@ void loop()
 
 	//------------------------------------------------------------------
 	
+	updateGamepadState(now);
+}
+
+//=====================================================================================================================================
+
+void updateGamepadState(TypeMS now)
+{
 	// Последнее время считывания кнопок и отправки отчета
 	static TypeMS prevGamepadProcessMs = 0;
 
@@ -195,8 +244,6 @@ void loop()
 		hidGamepad.sendReport();
 	}
 }
-
-//=====================================================================================================================================
 
 void readAllButtons()
 {
@@ -326,78 +373,79 @@ void indicateWarning()
 	powerLed.tick();
 }
 
-uint8_t get_battery_percent(uint16_t voltage_mv)
-{
-    if (voltage_mv >= BAT_VOLTAGE_MAP.front())  return 100;
-    if (voltage_mv <= BAT_VOLTAGE_MAP.back())   return 0;
-
-    for (size_t i = 0; i < BAT_VOLTAGE_MAP.size() - 1; i++)
-    {
-        // Напряжения верхней и нижней границы текущего интервала
-        uint16_t v_high = BAT_VOLTAGE_MAP[i];
-        uint16_t v_low  = BAT_VOLTAGE_MAP[i + 1];
-
-        if (voltage_mv >= v_low  &&  voltage_mv <= v_high)
-        {
-            float percent_high = 100 - i * BAT_PERCENT_STEP;        // процент для верхней границы (больше %)
-            float percent_low  = 100 - (i + 1) * BAT_PERCENT_STEP;  // процент для нижней границы (меньше %)
-
-            // Доля, на которую измеренное напряжение находится внутри интервала [0.0, 1.0]
-            // (0.0 — если voltage_mv == v_low, 1.0 — если == v_high)
-            float ratio = static_cast<float>(voltage_mv - v_low) / static_cast<float>(v_high - v_low);
-            
-            // SOC (State of Charge) — уровень заряда батареи в процентах
-			// C округлением до ближайшего целого в перспективе (добавляем 0.5 перед отбрасыванием дробной части)
-            float soc = percent_low + ratio * (percent_high - percent_low) + 0.5f;
-
-			// Ограничиваем диапазон значений и отбрасываем дробную часть
-			uint8_t res = static_cast<uint8_t>( std::clamp(soc, 0.0f, 100.0f) );
-            return res;
-        }
-    }
-
-    return 0;
-}
-
-uint16_t get_battery_voltage_mV()
-{
-	// Измерено: при реальных 5100 мВ на источнике питания, analogReadMilliVolts() выдаёт 2526 мВ
-	// Коэффициент коррекции = 5100 / 2526
-	// Показания при делителе Rверх = 100 кОм и Rниз = 100 кОм
-	// Rверх - от Vbat+ к пину измерения, Rниз - от GND к пину измерения
-	constexpr uint16_t vbatCalibration_mv = 5100;    // Реальное напряжение на источнике питания в мВ
-	constexpr uint16_t rawCalibration_mv = 2526;     // Показание analogReadMilliVolts на пине в мВ
-	
-	
-	uint32_t sum = 0;
-	for (uint8_t i = 0; i < BATTERY_READ_COUNT; i++)
+#if !USE_MAX1704X_FUEL_GAGE
+	uint8_t get_battery_percent(uint16_t voltage_mv)
 	{
-		sum += analogReadMilliVolts(POWER_PIN);
-	}
+		if (voltage_mv >= BAT_VOLTAGE_MAP.front())  return 100;
+		if (voltage_mv <= BAT_VOLTAGE_MAP.back())   return 0;
 
-	uint32_t raw_mV = sum / BATTERY_READ_COUNT;
-
-	//Отладка измерения напряжения
-	/*{
-		static bool isSerialStarted = false;
-		if ( !isSerialStarted )
+		for (size_t i = 0, sz = BAT_VOLTAGE_MAP.size(); i < (sz - 1); i++)
 		{
-			Serial.begin(115200);
-			while (!Serial) {  }
-			isSerialStarted = true;
+			// Напряжения верхней и нижней границы текущего интервала
+			uint16_t v_high = BAT_VOLTAGE_MAP[i];
+			uint16_t v_low  = BAT_VOLTAGE_MAP[i + 1];
+
+			if (voltage_mv >= v_low  &&  voltage_mv <= v_high)
+			{
+				float percent_high = 100 - i * BAT_PERCENT_STEP;        // процент для верхней границы (больше %)
+				float percent_low  = 100 - (i + 1) * BAT_PERCENT_STEP;  // процент для нижней границы (меньше %)
+
+				// Доля, на которую измеренное напряжение находится внутри интервала [0.0, 1.0]
+				// (0.0 — если voltage_mv == v_low, 1.0 — если == v_high)
+				float ratio = static_cast<float>(voltage_mv - v_low) / static_cast<float>(v_high - v_low);
+				
+				// SOC (State of Charge) — уровень заряда батареи в процентах
+				// C округлением до ближайшего целого в перспективе (добавляем 0.5 перед отбрасыванием дробной части)
+				float soc = percent_low + ratio * (percent_high - percent_low) + 0.5f;
+
+				// Ограничиваем диапазон значений и отбрасываем дробную часть
+				uint8_t res = static_cast<uint8_t>( std::clamp(soc, 0.0f, 100.0f) );
+				return res;
+			}
 		}
 
-		float bat_V = raw_mV / 1000.0f;
-		uint8_t percent = get_battery_percent(raw_mV);
+		return 0;
+	}
 
-		Serial.printf(" raw_mV == %u\n", raw_mV);
-		Serial.printf("%.3f V = %u %%\n*****\n", bat_V, percent);
-	}*/
+	uint16_t get_battery_voltage_mV()
+	{
+		// Измерено: при реальных 5100 мВ на источнике питания, analogReadMilliVolts() выдаёт 2526 мВ
+		// Коэффициент коррекции = 5100 / 2526
+		// Показания при делителе Rверх = 100 кОм и Rниз = 100 кОм
+		// Rверх - от Vbat+ к пину измерения, Rниз - от GND к пину измерения
+		constexpr uint16_t vbatCalibration_mv = 5100;    // Реальное напряжение на источнике питания в мВ
+		constexpr uint16_t rawCalibration_mv = 2526;     // Показание analogReadMilliVolts на пине в мВ
+		
+		
+		uint32_t sum = 0;
+		for (uint8_t i = 0; i < BATTERY_READ_COUNT; i++)
+		{
+			sum += analogReadMilliVolts(POWER_PIN);
+		}
 
-	raw_mV = (raw_mV * vbatCalibration_mv) / rawCalibration_mv;
+		uint32_t raw_mV = sum / BATTERY_READ_COUNT;
 
-	return static_cast<uint16_t>(raw_mV);
-}
+		//Отладка измерения напряжения
+		/*{
+			static bool isSerialStarted = false;
+			if ( !isSerialStarted )
+			{
+				Serial.begin(115200);
+				while (!Serial) {  }
+				isSerialStarted = true;
+			}
+
+			float bat_V = raw_mV / 1000.0f;
+			uint8_t percent = get_battery_percent(raw_mV);
+
+			Serial.printf(" %.3f V = %u %%\n*****\n", bat_V, percent);
+		}*/
+
+		raw_mV = (raw_mV * vbatCalibration_mv) / rawCalibration_mv;
+
+		return static_cast<uint16_t>(raw_mV);
+	}
+#endif
 
 void updatePowerState(TypeMS now)
 {
@@ -407,23 +455,39 @@ void updatePowerState(TypeMS now)
 	if ( BATTERY_INTERVAL_MS <= (now - prevBatteryProcessMs) )
 	{
 		prevBatteryProcessMs = now;
-		
-		uint16_t bat_mV = get_battery_voltage_mV();
-		uint8_t percent = get_battery_percent(bat_mV);
+
+		#if USE_MAX1704X_FUEL_GAGE
+			// Процент заряда аккумулятора c округлением до ближайшего целого перед отбрасыванием дробной части
+			uint8_t percent = static_cast<uint8_t>( batteryLevel.getSOC() + 0.5f );
+			percent = std::clamp<uint8_t>(percent, 0, 100);
+		#else
+			uint16_t bat_mV = get_battery_voltage_mV();
+			uint8_t percent = get_battery_percent(bat_mV);
+		#endif
 
 		hidGamepad.setBatteryLevel(percent);
 
 		// Критический разряд: быстро мигаем TODO и уходим в глубокий сон до зарядки
-		// TODO Не даем пользоваться устройством пока батарея не будет заряжена
-		while (bat_mV <= BATTERY_CRITICAL_LEVEL)
+		// Не даем пользоваться устройством пока батарея не будет заряжена
+		while (percent <= BATTERY_CRITICAL_PERCENT)
 		{
 			indicateCritical();
 			// TODO переход в глубокий сон
+
+			#if USE_MAX1704X_FUEL_GAGE
+				percent = static_cast<uint8_t>( batteryLevel.getSOC() + 0.5f );
+				percent = std::clamp<uint8_t>(percent, 0, 100);
+			#else
+				bat_mV = get_battery_voltage_mV();
+				percent = get_battery_percent(bat_mV);
+			#endif
 		}
 		
 		
-		if ( (bat_mV + VOLTAGE_ACCURACY_LEVEL) < BATTERY_WARNING_LEVEL )
-			indicateWarning();
+		if ( percent <= BATTERY_WARNING_PERCENT )
+		{
+			if ( !powerLed.running() )		indicateWarning();
+		}
 		
 		// Напряжение в норме – гасим светодиод
 		else if (powerLed.running())
@@ -541,6 +605,10 @@ void preparingForSleep()
 
 	timerCombination.stop();
 	timerInactivity.stop();
+
+	#if USE_MAX1704X_FUEL_GAGE
+		batteryLevel.sleep();		// Экономия 50-80 мкА
+	#endif
 
 	// TODO переход в глубокий сон
 }
