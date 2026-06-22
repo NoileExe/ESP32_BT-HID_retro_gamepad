@@ -92,7 +92,7 @@ public:
 
 
 public:
-	ESP32_HID_gamepad();
+	ESP32_HID_gamepad(const char* deviceName, const char* deviceManufacturer, uint8_t batteryLevel);
 
 	bool begin(GamepadType mode = GamepadType::Generic);
 	void end();

@@ -32,10 +32,10 @@
 
 //------------------------------------------------------------------
 
-ESP32_HID_gamepad::ESP32_HID_gamepad()
+ESP32_HID_gamepad::ESP32_HID_gamepad(const char* deviceName, const char* deviceManufacturer, uint8_t batteryLevel)
 	: currButtonMode(ESP32_HID_gamepad::ButtonMode::Standard)
 	, currGamepadType(ESP32_HID_gamepad::GamepadType::Generic)
-	, compositeHID(GAMEPAD_NAME.data(), GAMEPAD_MANUFACTURER.data())
+	, compositeHID(deviceName, deviceManufacturer, batteryLevel)
 	, ptrGamepadDevice()
 	, currBtns()
 	, prevBtns()
